@@ -1,14 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spaceweasel/promptui"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/strings/slices"
 
 	// Removes the bell that otherwise rings everytime the line changes.
@@ -33,38 +32,51 @@ func main() {
 		resourceType = os.Args[1]
 		selectors = os.Args[2:]
 	}
-	if slices.Contains(selectors, "--all-namespaces") {
-		fmt.Println("--all-namespaces is not supported")
-		return
+	if slices.Contains(selectors, "--all-namespaces") || slices.Contains(selectors, "-A") {
+		fmt.Println("-A, --all-namespaces is not supported")
+		os.Exit(1)
 	}
+	ns := extractNamespace(selectors)
+
 	objects := listObjects(resourceType, selectors)
 	if len(objects) == 0 {
 		fmt.Println("No objects found")
-		return
+		os.Exit(1)
 	}
 	selectedObjects, err := displayAndChooseObjects(resourceType, objects)
 	if err != nil {
 		fmt.Printf("Selecting Objects: %v\n", err)
-		return
+		os.Exit(1)
 	}
-	err = deletedObjects(resourceType, selectedObjects)
+
+	err = deleteObjects(ns, resourceType, selectedObjects)
 	if err != nil {
 		fmt.Printf("Deleting objects: %v\n", err)
-		return
+		os.Exit(1)
 	}
 }
 
-type kubernetesObjectList struct {
-	Items []kubernetesObject `json:"items"`
+func extractNamespace(selectors []string) string {
+	for i := 0; i < len(selectors); i++ {
+		s := selectors[i]
+		if p := "-n="; strings.HasPrefix(s, p) {
+			return s[len(p):]
+		}
+		if p := "--namespace="; strings.HasPrefix(s, p) {
+			return s[len(p):]
+		}
+		if s == "-n" || s == "--namespace" {
+			if j := i + 1; j < len(selectors) {
+				return selectors[j]
+			}
+			panic("Cannot extract namespace, last argument is -n/--namespace.")
+		}
+	}
+	return ""
 }
 
-type kubernetesObject struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
-}
-
-func listObjects(resourceType string, selectors []string) []kubernetesObject {
-	commandArgs := []string{"get", "-ojson"}
+func listObjects(resourceType string, selectors []string) []string {
+	commandArgs := []string{"get", "--no-headers"}
 	commandArgs = append(commandArgs, resourceType)
 	commandArgs = append(commandArgs, selectors...)
 	cmd := exec.Command(*kubectl, commandArgs...)
@@ -72,28 +84,29 @@ func listObjects(resourceType string, selectors []string) []kubernetesObject {
 	if err != nil {
 		panic(fmt.Errorf("listing configurations: %q, %w", cmd, err))
 	}
-	var list kubernetesObjectList
-	if err := json.Unmarshal(b, &list); err != nil {
-		panic(fmt.Errorf("json unmarshalling bytes: %q, %w", string(b), err))
+	s := strings.TrimSpace(string(b))
+	if strings.HasPrefix(s, "No resources found in ") {
+		return []string{}
 	}
-	return list.Items
+	list := strings.Split(s, "\n")
+	return list
 }
 
-func displayAndChooseObjects(resourceType string, objects []kubernetesObject) ([]kubernetesObject, error) {
+func displayAndChooseObjects(resourceType string, objects []string) ([]string, error) {
 	prompt := promptui.MultiSelect{
 		Label: fmt.Sprintf("Select resources of type %s to delete", resourceType),
 		Items: objects,
 		Size:  smaller(60, len(objects)),
 		Templates: &promptui.MultiSelectTemplates{
-			Selected:   "Delete - {{ .Name }}",
-			Unselected: "Keep   - {{ .Name }}",
+			Selected:   "Delete - {{ . }}",
+			Unselected: "Keep   - {{ . }}",
 		},
 	}
 	indices, err := prompt.Run()
 	if err != nil {
-		return []kubernetesObject{}, fmt.Errorf("Prompt failed: %v\n", err)
+		return []string{}, fmt.Errorf("Prompt failed: %v\n", err)
 	}
-	var selectedObjects []kubernetesObject
+	var selectedObjects []string
 	for _, selectedIndex := range indices {
 		selectedObjects = append(selectedObjects, objects[selectedIndex])
 	}
@@ -107,15 +120,20 @@ func smaller(a, b int) int {
 	return b
 }
 
-func deletedObjects(resourceType string, objects []kubernetesObject) error {
+func deleteObjects(ns, resourceType string, objects []string) error {
 	if len(objects) == 0 {
 		fmt.Println("Nothing to delete")
 		return nil
 	}
-	args := []string{"delete", resourceType}
-	args = append(args, kubectlNamespaceFlag(objects[0])...)
+	args := []string{"delete"}
+	if ns != "" {
+		args = append(args, "-n", ns)
+	}
+	if resourceType != "all" {
+		args = append(args, resourceType)
+	}
 	for _, o := range objects {
-		args = append(args, o.Name)
+		args = append(args, extractNameFromKubectlLine(o))
 	}
 	cmd := exec.Command(*kubectl, args...)
 	fmt.Printf("Running: %q\n", cmd)
@@ -127,9 +145,8 @@ func deletedObjects(resourceType string, objects []kubernetesObject) error {
 	return nil
 }
 
-func kubectlNamespaceFlag(o kubernetesObject) []string {
-	if o.Namespace != "" {
-		return []string{"-n", o.Namespace}
-	}
-	return []string{}
+
+func extractNameFromKubectlLine(o string) string {
+	// Assume it is the first column.
+	return strings.SplitN(o, " ", 2)[0]
 }
