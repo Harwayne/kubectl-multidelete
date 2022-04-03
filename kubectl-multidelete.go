@@ -9,6 +9,7 @@ import (
 
 	"github.com/spaceweasel/promptui"
 	"k8s.io/utils/strings/slices"
+	"golang.org/x/crypto/ssh/terminal"
 
 	// Removes the bell that otherwise rings everytime the line changes.
 	_ "github.com/Harwayne/kubectl-select/pkg/removebell"
@@ -93,10 +94,15 @@ func listObjects(resourceType string, selectors []string) []string {
 }
 
 func displayAndChooseObjects(resourceType string, objects []string) ([]string, error) {
+	_, terminalHeight, err := terminal.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		// Default to 24 for no particular reason.
+		terminalHeight = 24
+	}
 	prompt := promptui.MultiSelect{
 		Label: fmt.Sprintf("Select resources of type %s to delete", resourceType),
 		Items: objects,
-		Size:  smaller(60, len(objects)),
+		Size:  smaller(len(objects), terminalHeight - 3),
 		Templates: &promptui.MultiSelectTemplates{
 			Selected:   "Delete - {{ . }}",
 			Unselected: "Keep   - {{ . }}",
