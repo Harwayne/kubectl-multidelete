@@ -8,31 +8,31 @@ import (
 	"strings"
 
 	"github.com/spaceweasel/promptui"
-	"k8s.io/utils/strings/slices"
 	"golang.org/x/crypto/ssh/terminal"
+	"k8s.io/utils/strings/slices"
 
 	// Removes the bell that otherwise rings everytime the line changes.
 	_ "github.com/Harwayne/kubectl-select/pkg/removebell"
 )
 
 var (
-	kubectl = flag.String("kubectl", "kubectl", "kubectl command")
+	kubectl      = flag.String("kubectl", "kubectl", "kubectl command")
+	preselectAll = flag.Bool("preselect-all", false, "Preselect everything for deletion")
 )
 
 func main() {
 	flag.Parse()
 
-	var resourceType string
-	var selectors []string
-	switch len(os.Args) {
-	case 1:
-		panic(fmt.Errorf("not enough arguments. Usage kubectl multidelete <type> [-l selector]"))
-	case 2:
-		resourceType = os.Args[1]
-	default:
-		resourceType = os.Args[1]
-		selectors = os.Args[2:]
+	if len(flag.Args()) == 0 {
+		fmt.Println("Usage:  kubectl multidelete [-preselect-all] <type> [other kubectl get flags]")
+		fmt.Println("Example: kubectl multidelete ns")
+		fmt.Println("Example: kubectl multidelete -preselect-all po -n foo -l bar=qux")
+		os.Exit(1)
 	}
+
+	resourceType := flag.Arg(0)
+	selectors := flag.Args()[1:]
+
 	if slices.Contains(selectors, "--all-namespaces") || slices.Contains(selectors, "-A") {
 		fmt.Println("-A, --all-namespaces is not supported")
 		os.Exit(1)
@@ -83,10 +83,10 @@ func listObjects(resourceType string, selectors []string) []string {
 	cmd := exec.Command(*kubectl, commandArgs...)
 	b, err := cmd.CombinedOutput()
 	if err != nil {
-		panic(fmt.Errorf("listing configurations: %q, %w", cmd, err))
+		panic(fmt.Errorf("listing configurations: %q, %w\n%s", cmd, err, string(b)))
 	}
 	s := strings.TrimSpace(string(b))
-	if strings.HasPrefix(s, "No resources found in ") {
+	if strings.HasPrefix(s, "No resources found") {
 		return []string{}
 	}
 	list := strings.Split(s, "\n")
@@ -99,14 +99,23 @@ func displayAndChooseObjects(resourceType string, objects []string) ([]string, e
 		// Default to 24 for no particular reason.
 		terminalHeight = 24
 	}
+	var preselected []int
+	if *preselectAll {
+		preselected = make([]int, len(objects))
+		for i := 0; i < len(preselected); i++ {
+			preselected[i] = i
+		}
+	}
 	prompt := promptui.MultiSelect{
 		Label: fmt.Sprintf("Select resources of type %s to delete", resourceType),
 		Items: objects,
-		Size:  smaller(len(objects), terminalHeight - 3),
+		Size:  smaller(len(objects), terminalHeight-3),
 		Templates: &promptui.MultiSelectTemplates{
+			Active:     fmt.Sprintf("%s{{ . | underline }}", promptui.IconSelect),
 			Selected:   "Delete - {{ . }}",
 			Unselected: "Keep   - {{ . }}",
 		},
+		Selected: preselected,
 	}
 	indices, err := prompt.Run()
 	if err != nil {
@@ -150,7 +159,6 @@ func deleteObjects(ns, resourceType string, objects []string) error {
 	}
 	return nil
 }
-
 
 func extractNameFromKubectlLine(o string) string {
 	// Assume it is the first column.
